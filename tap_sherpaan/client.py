@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import re
 from typing import Any, Callable, Dict, Iterable, Optional, Union
 
 import xmltodict
@@ -22,6 +23,15 @@ logging.getLogger("zeep.transports").setLevel(logging.WARNING)
 logging.getLogger("zeep.xsd.schema").setLevel(logging.WARNING)
 logging.getLogger("zeep.wsdl.wsdl").setLevel(logging.WARNING)
 logging.getLogger("requests").setLevel(logging.WARNING)
+
+# XML 1.0 forbids C0 controls except tab, line feed, and carriage return.
+_INVALID_XML_CONTROLS = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+_INVALID_XML_CONTROL_REFERENCES = re.compile(
+    r"(?P<literal><!\[CDATA\[.*?\]\]>|<!--.*?-->|<\?.*?\?>)"
+    r"|&#0*(?:[0-8]|1[124-9]|2[0-9]|3[01]);"
+    r"|&#x0*(?:[0-8bcefBCEF]|1[0-9a-fA-F]);",
+    re.DOTALL,
+)
 
 
 class SherpaClient:
@@ -302,6 +312,18 @@ class SherpaStream(Stream):
             Parsed response dictionary
         """
         try:
+            if service_name == "SupplierInfo":
+                cleaned_xml = _INVALID_XML_CONTROLS.sub("", xml_response)
+                cleaned_xml = _INVALID_XML_CONTROL_REFERENCES.sub(
+                    lambda match: match.group("literal") or "", cleaned_xml
+                )
+                if cleaned_xml != xml_response:
+                    self.logger.warning(
+                        "Removed XML 1.0-forbidden control characters from "
+                        "SupplierInfo response for supplier %r",
+                        self._current_client_code,
+                    )
+                    xml_response = cleaned_xml
             xml_dict = xmltodict.parse(xml_response)
             soap_body = xml_dict.get("soap:Envelope", {}).get("soap:Body", {})
             
@@ -325,7 +347,7 @@ class SherpaStream(Stream):
             return {}
         except Exception as e:
             self.logger.error(f"Failed to parse SOAP response: {e}")
-            return {}
+            raise
 
     def get_records_with_token_pagination(
         self,
